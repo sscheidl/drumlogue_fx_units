@@ -1,0 +1,15 @@
+logue-sdk/
+
+units/**/build/
+units/**/.dep/
+units/**/*.drmlgunit
+units/**/*.bin
+units/**/*.hex
+units/**/*.dmp
+units/**/*.list
+units/**/*.map
+units/**/*.o
+units/**/*.lst
+
+.DS_Store
+Thumbs.db
