@@ -48,6 +48,8 @@ class GrainDrift {
 
     color_lp_[0] = 0.0f;
     color_lp_[1] = 0.0f;
+    feedback_lp_[0] = 0.0f;
+    feedback_lp_[1] = 0.0f;
     lofi_hold_[0] = 0.0f;
     lofi_hold_[1] = 0.0f;
     out_dc_x_[0] = 0.0f;
@@ -60,6 +62,8 @@ class GrainDrift {
     density_accum_ = 0.0f;
     sm_density_ = percentToUnit(getClampedParam(kParamDensity));
     sm_grain_len_ = percentToUnit(getClampedParam(kParamGrainLength));
+    sm_flow_ = percentToUnit(getClampedParam(kParamFlow));
+    sm_feed_ = percentToUnit(getClampedParam(kParamFeed));
     sm_pitch_ = static_cast<float>(getClampedParam(kParamPitch) - 24);
     last_rhythm_ = getClampedParam(kParamRhythm);
     rng_ = 0x12345678U;
@@ -72,10 +76,10 @@ class GrainDrift {
     const float density_target = percentToUnit(getClampedParam(kParamDensity));
     const float grain_len_target = percentToUnit(getClampedParam(kParamGrainLength));
     const int32_t rhythm = getClampedParam(kParamRhythm);
-    const float mix = percentToUnit(getClampedParam(kParamMix));
+    const float flow_target = percentToUnit(getClampedParam(kParamFlow));
+    const float feed_target = percentToUnit(getClampedParam(kParamFeed));
     const float pitch_target = static_cast<float>(getClampedParam(kParamPitch) - 24);
     const float spread = percentToUnit(getClampedParam(kParamSpread));
-    const float pan = percentToUnit(getClampedParam(kParamPan));
     const int32_t color = getClampedParam(kParamColor);
     const float chaos = percentToUnit(getClampedParam(kParamChaos));
     const float block_smooth =
@@ -91,20 +95,28 @@ class GrainDrift {
 
     sm_density_ += (density_target - sm_density_) * block_smooth;
     sm_grain_len_ += (grain_len_target - sm_grain_len_) * block_smooth;
+    sm_flow_ += (flow_target - sm_flow_) * block_smooth;
+    sm_feed_ += (feed_target - sm_feed_) * block_smooth;
     sm_pitch_ += (pitch_target - sm_pitch_) * block_smooth;
 
     const float density = clampFloat(sm_density_, 0.0f, 1.0f);
     const float grain_len_pct = clampFloat(sm_grain_len_, 0.0f, 1.0f);
+    const float flow = clampFloat(sm_flow_, 0.0f, 1.0f);
+    const float feed = clampFloat(sm_feed_, 0.0f, 1.0f);
     const float pitch_semitones = clampFloat(sm_pitch_, -24.0f, 12.0f);
 
-    const float step_samples = getRhythmStepSamples(rhythm);
+    const float step_samples = getRhythmStepSamples(rhythm, flow);
     const float density_curve = density * density * (3.0f - 2.0f * density);
-    const float grains_per_beat = 1.25f + density_curve * 24.0f;
-    const uint8_t voice_budget = getVoiceBudget(grain_len_pct, density, rhythm);
-    const uint8_t spawn_limit = getSpawnLimit(grain_len_pct, density, rhythm);
-    const float wet_drive = 1.25f + 1.65f * density + 0.85f * chaos;
-    const float wet_level = mix * (1.12f + 1.58f * density);
-    const float dry_level = 1.0f - 0.92f * mix;
+    const float flow_curve = flow * flow * (3.0f - 2.0f * flow);
+    const float grains_per_beat =
+        (2.0f + density_curve * (5.0f + 27.0f * flow_curve)) * flow;
+    const uint8_t voice_budget =
+        getVoiceBudget(grain_len_pct, density, rhythm, flow);
+    const uint8_t spawn_limit =
+        getSpawnLimit(grain_len_pct, density, rhythm, flow);
+    const float wet_drive = 1.12f + 1.50f * density + 0.75f * flow +
+                            0.82f * chaos;
+    const float wet_level = flow * (1.08f + 1.55f * density + 0.32f * chaos);
 
     const float * __restrict in_p = in;
     float * __restrict out_p = out;
@@ -112,34 +124,33 @@ class GrainDrift {
       const float dry_l = clampFloat(in_p[0], -1.0f, 1.0f);
       const float dry_r = clampFloat(in_p[1], -1.0f, 1.0f);
 
-      buffer_l_[write_index_] = floatToI16(dry_l);
-      buffer_r_[write_index_] = floatToI16(dry_r);
-
       scheduler_counter_ += 1.0f;
       while (scheduler_counter_ >= step_samples) {
         scheduler_counter_ -= step_samples;
-        scheduleStep(grains_per_beat, density, grain_len_pct, rhythm,
-                     pitch_semitones, spread, pan, chaos, step_samples,
+        scheduleStep(grains_per_beat, density, flow, grain_len_pct, rhythm,
+                     pitch_semitones, spread, chaos, step_samples,
                      voice_budget, spawn_limit);
       }
 
       float wet_l = 0.0f;
       float wet_r = 0.0f;
       renderGrains(wet_l, wet_r, voice_budget);
-      renderGhostRepeats(wet_l, wet_r, step_samples, density, spread, pan,
+      renderGhostRepeats(wet_l, wet_r, step_samples, density, flow, spread,
                          chaos, rhythm);
       applyColorStereo(wet_l, wet_r, color, chaos);
 
       wet_l = softClip(wet_l * wet_drive);
       wet_r = softClip(wet_r * wet_drive);
 
-      float out_l = dry_l * dry_level + wet_l * wet_level;
-      float out_r = dry_r * dry_level + wet_r * wet_level;
+      writeInputWithFeedback(dry_l, dry_r, wet_l, wet_r, feed, flow, chaos);
+
+      float out_l = wet_l * wet_level;
+      float out_r = wet_r * wet_level;
       out_l = processDcBlock(out_l, 0);
       out_r = processDcBlock(out_r, 1);
 
-      out_p[0] = outputLimit(safeAudio(out_l, dry_l));
-      out_p[1] = outputLimit(safeAudio(out_r, dry_r));
+      out_p[0] = outputLimit(safeAudio(out_l, 0.0f));
+      out_p[1] = outputLimit(safeAudio(out_r, 0.0f));
 
       write_index_ = (write_index_ + 1U) & kBufferMask;
     }
@@ -199,10 +210,10 @@ class GrainDrift {
     kParamDensity = 0,
     kParamGrainLength,
     kParamRhythm,
-    kParamMix,
+    kParamFlow,
+    kParamFeed,
     kParamPitch,
     kParamSpread,
-    kParamPan,
     kParamColor,
     kParamChaos,
     kNumParams
@@ -224,7 +235,9 @@ class GrainDrift {
   static constexpr size_t kBufferMask = kBufferSize - 1U;
   static constexpr uint8_t kMaxGrains = 16U;
   static constexpr uint8_t kMinVoiceBudget = 8U;
-  static constexpr int32_t kNumRhythms = 6;
+  static constexpr int32_t kNumRhythms = 16;
+  static constexpr int32_t kRhythmBurst = 14;
+  static constexpr int32_t kRhythmFree = 15;
   static constexpr int32_t kNumColors = 3;
   static constexpr float kMaxLookback = static_cast<float>(kBufferSize - 512U);
 
@@ -286,24 +299,30 @@ class GrainDrift {
   }
 
   static inline uint8_t getVoiceBudget(float grain_len_pct, float density,
-                                       int32_t rhythm) {
+                                       int32_t rhythm, float flow) {
     const float load = clampFloat(grain_len_pct * density, 0.0f, 1.0f);
-    int32_t budget = static_cast<int32_t>(20.0f - load * 12.0f);
-    if (rhythm == 2 || rhythm == 4)
-      budget -= 2;
-    if (rhythm == 5)
-      budget -= 3;
+    int32_t budget = static_cast<int32_t>(16.0f - load * 7.0f);
+    if (rhythm <= 4)
+      budget -= 1;
+    if (rhythm == kRhythmBurst)
+      budget -= static_cast<int32_t>(1.0f + flow * 2.0f);
+    if (rhythm == kRhythmFree)
+      budget -= static_cast<int32_t>(flow * 2.0f);
     return static_cast<uint8_t>(clampInt(budget, kMinVoiceBudget, kMaxGrains));
   }
 
   static inline uint8_t getSpawnLimit(float grain_len_pct, float density,
-                                      int32_t rhythm) {
+                                      int32_t rhythm, float flow) {
     const float load = clampFloat(grain_len_pct * density, 0.0f, 1.0f);
-    int32_t limit = rhythm == 5 ? 5 : 4;
-    limit -= static_cast<int32_t>(load * 2.8f);
-    if (rhythm == 2 || rhythm == 4)
+    int32_t limit = 1 + static_cast<int32_t>(flow * 4.0f);
+    if (rhythm == kRhythmBurst)
+      limit = 3 + static_cast<int32_t>(flow * 4.0f);
+    if (rhythm == kRhythmFree)
+      limit = 1 + static_cast<int32_t>(flow * 3.0f);
+    limit -= static_cast<int32_t>(load * 2.5f);
+    if (rhythm <= 4)
       --limit;
-    return static_cast<uint8_t>(clampInt(limit, 1, 5));
+    return static_cast<uint8_t>(clampInt(limit, 1, 6));
   }
 
   static inline float grainEnvelope(float phase) {
@@ -328,19 +347,43 @@ class GrainDrift {
     return position;
   }
 
-  inline float getRhythmStepSamples(int32_t rhythm) const {
+  inline float getRhythmStepSamples(int32_t rhythm, float flow) const {
     switch (rhythm) {
       case 0:
-        return samples_per_beat_ * 0.5f;
+        return samples_per_beat_ * 0.0625f;
       case 1:
-        return samples_per_beat_ * 0.25f;
+        return samples_per_beat_ / 24.0f;
       case 2:
         return samples_per_beat_ * 0.125f;
       case 3:
-        return samples_per_beat_ / 3.0f;
+        return samples_per_beat_ / 12.0f;
       case 4:
-        return samples_per_beat_ / 6.0f;
+        return samples_per_beat_ * 0.1875f;
       case 5:
+        return samples_per_beat_ * 0.25f;
+      case 6:
+        return samples_per_beat_ / 6.0f;
+      case 7:
+        return samples_per_beat_ * 0.375f;
+      case 8:
+        return samples_per_beat_ * 0.5f;
+      case 9:
+        return samples_per_beat_ / 3.0f;
+      case 10:
+        return samples_per_beat_ * 0.75f;
+      case 11:
+        return samples_per_beat_;
+      case 12:
+        return samples_per_beat_ * (2.0f / 3.0f);
+      case 13:
+        return samples_per_beat_ * 1.5f;
+      case kRhythmBurst:
+        return samples_per_beat_ * 0.25f;
+      case kRhythmFree: {
+        const float flow_curve = flow * flow * (3.0f - 2.0f * flow);
+        return clampFloat(samples_per_beat_ * lerp(0.38f, 0.035f, flow_curve),
+                          128.0f, samples_per_beat_ * 0.5f);
+      }
       default:
         return samples_per_beat_ * 0.25f;
     }
@@ -349,7 +392,7 @@ class GrainDrift {
   inline float getStepsPerBeat(float step_samples) const {
     return clampFloat(samples_per_beat_ / clampFloat(step_samples, 1.0f,
                                                      samples_per_beat_ * 2.0f),
-                      1.0f, 12.0f);
+                      0.67f, 32.0f);
   }
 
   static inline float mapGrainLengthSamples(float grain_len_pct) {
@@ -357,31 +400,41 @@ class GrainDrift {
     return 160.0f + shaped * 8200.0f;
   }
 
-  inline void scheduleStep(float grains_per_beat, float density,
+  inline void scheduleStep(float grains_per_beat, float density, float flow,
                            float grain_len_pct, int32_t rhythm,
-                           float pitch_semitones, float spread, float pan,
-                           float chaos, float step_samples,
+                           float pitch_semitones, float spread, float chaos,
+                           float step_samples,
                            uint8_t voice_budget, uint8_t spawn_limit) {
+    if (density <= 0.005f || flow <= 0.005f) {
+      density_accum_ = 0.0f;
+      return;
+    }
+
     const float steps_per_beat = getStepsPerBeat(step_samples);
     float density_variation = 1.0f + nextRandSigned() * chaos * 0.22f;
 
-    if (rhythm == 5)
-      density_variation *= 1.45f + 1.10f * chaos;
+    if (rhythm == kRhythmBurst)
+      density_variation *= 1.20f + flow * 2.20f + chaos * 0.80f;
+    if (rhythm == kRhythmFree)
+      density_variation *= 0.75f + flow * 1.55f + chaos * 0.45f;
 
     density_accum_ += clampFloat((grains_per_beat / steps_per_beat) *
                                      density_variation,
                                  0.0f, 7.0f);
 
-    if (rhythm == 5)
-      density_accum_ += 0.65f + density * 2.35f;
+    if (rhythm == kRhythmBurst)
+      density_accum_ += flow * (0.85f + density * 2.75f);
+    if (rhythm == kRhythmFree)
+      density_accum_ += flow * density * (0.25f + chaos * 0.85f);
 
-    if (density > 0.72f && density_accum_ < 1.0f)
+    if (density > 0.72f && flow > 0.25f && density_accum_ < 1.0f)
       density_accum_ = 1.0f;
 
     uint8_t spawned = 0;
     while (density_accum_ >= 1.0f && spawned < spawn_limit) {
       (void)spawnGrain(density, grain_len_pct, rhythm, pitch_semitones, spread,
-                       pan, chaos, step_samples, grains_per_beat, voice_budget);
+                       flow, chaos, step_samples, grains_per_beat,
+                       voice_budget);
       density_accum_ -= 1.0f;
       ++spawned;
     }
@@ -391,17 +444,26 @@ class GrainDrift {
   }
 
   inline bool spawnGrain(float density, float grain_len_pct, int32_t rhythm,
-                         float pitch_semitones, float spread, float pan,
+                         float pitch_semitones, float spread, float flow,
                          float chaos, float step_samples,
                          float grains_per_beat, uint8_t voice_budget) {
     uint8_t slot = 0;
-    if (!findVoiceSlot(voice_budget, slot))
+    if (!findVoiceSlot(voice_budget, chaos, slot))
       return false;
     Grain & voice = grains_[slot];
 
+    const float base_length = mapGrainLengthSamples(grain_len_pct);
+    const float length_variation =
+        1.0f + nextRandSigned() * chaos * (0.18f + 0.30f * flow);
     const float grain_length =
-        clampFloat(mapGrainLengthSamples(grain_len_pct), 96.0f, kMaxLookback * 0.5f);
-    const float rhythm_pull = rhythm == 2 || rhythm == 4 ? 0.70f : 1.0f;
+        clampFloat(base_length * length_variation, 80.0f, kMaxLookback * 0.5f);
+    float rhythm_pull = 1.0f;
+    if (rhythm <= 4)
+      rhythm_pull = 0.58f;
+    else if (rhythm <= 7)
+      rhythm_pull = 0.72f;
+    if (rhythm == kRhythmBurst)
+      rhythm_pull *= 0.48f + spread * 0.34f;
     const float lookback_base =
         clampFloat(step_samples * (0.70f + 0.82f * spread) * rhythm_pull +
                        grain_length * 0.62f,
@@ -409,27 +471,28 @@ class GrainDrift {
     const float timing_depth = step_samples * spread * (0.10f + 0.60f * chaos);
     float lookback = lookback_base + nextRandSigned() * timing_depth;
 
-    if (rhythm == 5)
+    if (rhythm == kRhythmBurst)
       lookback += nextRandSigned() * step_samples * (0.25f + 0.75f * chaos);
+    if (rhythm == kRhythmFree)
+      lookback += nextRandSigned() * step_samples * (0.10f + 1.15f * chaos);
 
     lookback = clampFloat(lookback, grain_length + 32.0f, kMaxLookback);
 
     const float random_pitch =
-        nextRandSigned() * spread * (1.5f + 10.5f * chaos) +
-        nextRandSigned() * chaos * 2.5f;
+        nextRandSigned() * spread * (1.5f + 12.5f * chaos) +
+        nextRandSigned() * chaos * 3.5f;
     const float increment =
         semitonesToRatio(clampFloat(pitch_semitones + random_pitch, -30.0f,
                                     24.0f));
 
-    const float stereo_bias = (pan - 0.5f) * 0.75f;
     const float random_stereo =
-        nextRandSigned() * spread * (0.35f + 0.65f * chaos);
-    const float stereo = clampFloat(stereo_bias + random_stereo, -0.98f, 0.98f);
+        nextRandSigned() * spread * (0.40f + 0.85f * chaos);
+    const float stereo = clampFloat(random_stereo, -0.98f, 0.98f);
     const float gain_l = sqrtf(0.5f * (1.0f - stereo));
     const float gain_r = sqrtf(0.5f * (1.0f + stereo));
     const float level =
-        (0.48f + 0.36f * density + 0.18f * chaos) /
-        sqrtf(1.0f + clampFloat(grains_per_beat, 0.0f, 28.0f) * 0.055f);
+        (0.50f + 0.34f * density + 0.22f * flow + 0.18f * chaos) /
+        sqrtf(1.0f + clampFloat(grains_per_beat, 0.0f, 36.0f) * 0.055f);
 
     voice.active = true;
     voice.read_pos = wrapPosition(static_cast<float>(write_index_) - lookback);
@@ -442,7 +505,8 @@ class GrainDrift {
     return true;
   }
 
-  inline bool findVoiceSlot(uint8_t voice_budget, uint8_t &slot) const {
+  inline bool findVoiceSlot(uint8_t voice_budget, float chaos,
+                            uint8_t &slot) const {
     const uint8_t limit = voice_budget > kMaxGrains ? kMaxGrains : voice_budget;
 
     for (uint8_t i = 0; i < limit; ++i) {
@@ -452,7 +516,22 @@ class GrainDrift {
       }
     }
 
-    return false;
+    if (chaos < 0.65f)
+      return false;
+
+    float oldest_phase = -1.0f;
+    uint8_t oldest_slot = 0;
+    for (uint8_t i = 0; i < limit; ++i) {
+      const Grain & voice = grains_[i];
+      const float phase = voice.age / clampFloat(voice.duration, 1.0f, 65536.0f);
+      if (phase > oldest_phase) {
+        oldest_phase = phase;
+        oldest_slot = i;
+      }
+    }
+
+    slot = oldest_slot;
+    return true;
   }
 
   inline float readBuffer(const int16_t * buffer, float position) const {
@@ -508,23 +587,25 @@ class GrainDrift {
   }
 
   inline void renderGhostRepeats(float &wet_l, float &wet_r, float step_samples,
-                                 float density, float spread, float pan,
+                                 float density, float flow, float spread,
                                  float chaos, int32_t rhythm) {
-    const float stereo_bias = (pan - 0.5f) * 0.55f;
-    const float jitter = step_samples * spread * (0.05f + 0.23f * chaos);
+    const float jitter = step_samples * spread * (0.05f + 0.33f * chaos);
     const float base = clampFloat(step_samples, 96.0f, kMaxLookback * 0.50f);
-    const float burst_tighten = rhythm == 5 ? 0.52f : 1.0f;
+    const float burst_tighten = rhythm == kRhythmBurst ? 0.52f : 1.0f;
     const float tap1 = clampFloat(base * burst_tighten, 96.0f, kMaxLookback);
-    const float tap2 = clampFloat(base * (rhythm == 5 ? 0.76f : 1.72f), 128.0f,
-                                  kMaxLookback);
+    const float tap2 =
+        clampFloat(base * (rhythm == kRhythmBurst ? 0.76f : 1.72f), 128.0f,
+                   kMaxLookback);
 
-    const float g1 = 0.18f + 0.40f * density;
-    const float g2 = 0.07f + 0.24f * density * (0.45f + 0.55f * chaos);
+    const float flow_level = flow * (0.65f + 0.35f * flow);
+    const float g1 = (0.16f + 0.46f * density) * flow_level;
+    const float g2 =
+        (0.06f + 0.31f * density * (0.45f + 0.55f * chaos)) * flow_level;
 
     const float l1 = readBuffer(buffer_l_, static_cast<float>(write_index_) -
-                                             tap1 - jitter * (1.0f + stereo_bias));
+                                             tap1 - jitter);
     const float r1 = readBuffer(buffer_r_, static_cast<float>(write_index_) -
-                                             tap1 + jitter * (1.0f - stereo_bias));
+                                             tap1 + jitter);
     const float l2 = readBuffer(buffer_r_, static_cast<float>(write_index_) -
                                              tap2 + jitter * 0.57f);
     const float r2 = readBuffer(buffer_l_, static_cast<float>(write_index_) -
@@ -564,6 +645,31 @@ class GrainDrift {
     }
   }
 
+  inline void writeInputWithFeedback(float dry_l, float dry_r, float wet_l,
+                                     float wet_r, float feed, float flow,
+                                     float chaos) {
+    const float feed_curve = feed * feed * (3.0f - 2.0f * feed);
+    const float feedback_amount = clampFloat(feed_curve * flow * 0.82f, 0.0f,
+                                             0.82f);
+    const float cross = clampFloat(chaos * 0.32f, 0.0f, 0.32f);
+    const float fb_src_l = lerp(wet_l, wet_r, cross);
+    const float fb_src_r = lerp(wet_r, wet_l, cross);
+    const float fb_alpha = 0.052f + chaos * 0.090f;
+
+    feedback_lp_[0] +=
+        fb_alpha * (softClip(fb_src_l * feedback_amount) - feedback_lp_[0]);
+    feedback_lp_[1] +=
+        fb_alpha * (softClip(fb_src_r * feedback_amount) - feedback_lp_[1]);
+
+    feedback_lp_[0] = clampFloat(feedback_lp_[0] * 0.9985f, -0.92f, 0.92f);
+    feedback_lp_[1] = clampFloat(feedback_lp_[1] * 0.9985f, -0.92f, 0.92f);
+
+    buffer_l_[write_index_] =
+        floatToI16(softClip(safeAudio(dry_l + feedback_lp_[0], dry_l)));
+    buffer_r_[write_index_] =
+        floatToI16(softClip(safeAudio(dry_r + feedback_lp_[1], dry_r)));
+  }
+
   static inline float quantize(float x, int32_t bits) {
     const int32_t clamped_bits = clampInt(bits, 3, 16);
     const float levels = static_cast<float>(1U << clamped_bits);
@@ -592,6 +698,7 @@ class GrainDrift {
   int16_t buffer_r_[kBufferSize] = {};
   Grain grains_[kMaxGrains];
   float color_lp_[2] = {0.0f, 0.0f};
+  float feedback_lp_[2] = {0.0f, 0.0f};
   float lofi_hold_[2] = {0.0f, 0.0f};
   float out_dc_x_[2] = {0.0f, 0.0f};
   float out_dc_y_[2] = {0.0f, 0.0f};
@@ -603,17 +710,21 @@ class GrainDrift {
   float density_accum_ = 0.0f;
   float sm_density_ = 0.60f;
   float sm_grain_len_ = 0.45f;
+  float sm_flow_ = 0.55f;
+  float sm_feed_ = 0.18f;
   float sm_pitch_ = 0.0f;
   int32_t last_rhythm_ = 1;
   uint32_t rng_ = 0x12345678U;
 };
 
 const int32_t GrainDrift::kParamMin[9] = {0, 10, 0, 0, 0, 0, 0, 0, 0};
-const int32_t GrainDrift::kParamMax[9] = {100, 100, 5, 100, 36, 100, 100, 2,
+const int32_t GrainDrift::kParamMax[9] = {100, 100, 15, 100, 100, 36, 100, 2,
                                           100};
-const int32_t GrainDrift::kParamInit[9] = {60, 45, 1, 55, 24, 55, 70, 0, 35};
-const char * const GrainDrift::kRhythmNames[6] = {"1/8", "1/16", "1/32",
-                                                  "1/8T", "1/16T", "BURST"};
+const int32_t GrainDrift::kParamInit[9] = {60, 45, 5, 55, 18, 24, 55, 0, 35};
+const char * const GrainDrift::kRhythmNames[16] = {
+    "1/64", "1/64T", "1/32", "1/32T", "1/32D", "1/16",
+    "1/16T", "1/16D", "1/8", "1/8T", "1/8D", "1/4",
+    "1/4T", "1/4D", "BURST", "FREE"};
 const char * const GrainDrift::kPitchNames[37] = {
     "-24", "-23", "-22", "-21", "-20", "-19", "-18", "-17", "-16",
     "-15", "-14", "-13", "-12", "-11", "-10", "-9",  "-8",  "-7",
