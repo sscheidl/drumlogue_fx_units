@@ -1,0 +1,82 @@
+name: Beta bug report
+description: Report a reproducible problem with a drumlogue FX beta binary
+title: "[Beta bug]: "
+labels:
+  - bug
+  - beta
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing these units on real hardware. Please provide enough detail to reproduce the issue.
+  - type: dropdown
+    id: unit
+    attributes:
+      label: Unit
+      options:
+        - GrainDrift V2
+        - MixForge
+        - TapeVibe
+        - DrumShuffler
+        - GateVerb80
+    validations:
+      required: true
+  - type: input
+    id: release
+    attributes:
+      label: Release
+      description: The release tag shown on the GitHub download page.
+      placeholder: v0.1.0-beta.1
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: drumlogue firmware
+      placeholder: e.g. 1.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Parameter settings
+      description: List the relevant values or attach a clear photo.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Load ...
+        2. Set ...
+        3. Play ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: restart
+    attributes:
+      label: Does it still happen after restarting the drumlogue?
+      options:
+        - "Yes"
+        - "No"
+        - Not tested
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Additional context
+      description: Add logs, project details, or audio/video evidence here.

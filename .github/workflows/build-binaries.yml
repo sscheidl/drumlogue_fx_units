@@ -1,0 +1,76 @@
+name: Build drumlogue binaries
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "units/**"
+      - ".github/workflows/build-binaries.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Check out pinned KORG logue SDK
+        run: |
+          git clone --filter=blob:none https://github.com/korginc/logue-sdk.git logue-sdk
+          git -C logue-sdk checkout f6f073bb83d5ef69310fca609c41ddcf722dd558
+
+      - name: Stage unit projects in SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp -R units/delfx/graindrift logue-sdk/platform/drumlogue/taureon-graindrift
+          cp -R units/masterfx/mixforge logue-sdk/platform/drumlogue/taureon-mixforge
+          cp -R units/masterfx/tapevibe logue-sdk/platform/drumlogue/taureon-tapevibe
+          cp -R units/masterfx/drumshuffler logue-sdk/platform/drumlogue/taureon-drumshuffler
+          cp -R units/revfx/gateverb80 logue-sdk/platform/drumlogue/taureon-gateverb80
+
+      - name: Build all units
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull xiashj/logue-sdk:latest
+          for project in \
+            taureon-graindrift \
+            taureon-mixforge \
+            taureon-tapevibe \
+            taureon-drumshuffler \
+            taureon-gateverb80
+          do
+            docker run --rm \
+              -v "$PWD/logue-sdk/platform:/workspace" \
+              -h logue-sdk \
+              xiashj/logue-sdk:latest \
+              /app/cmd_entry build "drumlogue/$project"
+          done
+
+      - name: Collect and verify release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp logue-sdk/platform/drumlogue/taureon-graindrift/taureon_graindrift.drmlgunit dist/
+          cp logue-sdk/platform/drumlogue/taureon-mixforge/taureon_mixforge.drmlgunit dist/
+          cp logue-sdk/platform/drumlogue/taureon-tapevibe/taureon_tapevibe.drmlgunit dist/
+          cp logue-sdk/platform/drumlogue/taureon-drumshuffler/taureon_drumshuffler.drmlgunit dist/
+          cp logue-sdk/platform/drumlogue/taureon-gateverb80/taureon_gateverb80.drmlgunit dist/
+          file dist/*.drmlgunit | tee dist/FILE_TYPES.txt
+          grep -c "ELF 32-bit LSB shared object, ARM" dist/FILE_TYPES.txt | grep -q '^5$'
+          (cd dist && sha256sum *.drmlgunit > SHA256SUMS.txt)
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: drumlogue-fx-units
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
