@@ -32,8 +32,9 @@ Safely eject the device and restart it.
 
 ## Beta testing
 
-Please report problems with the beta bug-report form and include the drumlogue
-firmware version, unit settings and exact reproduction steps. Long sessions,
+Please report problems with the
+[beta bug-report form](https://github.com/sscheidl/drumlogue_fx_units/issues/new?template=beta-bug-report.yml)
+and include the drumlogue firmware version, unit settings and exact reproduction steps. Long sessions,
 tempo changes, rapid parameter changes, extreme settings, unexpected clipping
 or level jumps, and project save/restore are especially valuable test cases.
 

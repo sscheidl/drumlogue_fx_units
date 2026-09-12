@@ -1,4 +1,5 @@
 logue-sdk/
+release/
 
 units/**/build/
 units/**/.dep/
