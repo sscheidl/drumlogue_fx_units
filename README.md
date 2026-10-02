@@ -2,6 +2,8 @@
 
 Custom effects for the Korg drumlogue, built with the logue SDK v2.
 
+![Korg drumlogue FX units preview](https://taureon-music.de/images/taureon/dev_lab/drumlogue.webp)
+
 > [!WARNING]
 > These units are **pre-release beta software**. They have passed initial tests
 > on drumlogue hardware, but they have not yet been tested exhaustively. Keep
